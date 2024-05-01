@@ -1,0 +1,362 @@
+#!/usr/bin/env bash
+
+###############################
+# query and retrieve series from studies on a    
+# DICOM peer using DCMTK tools                                           
+#                                                                        
+# Author: Stephen Wastling 
+#
+# Acknowledgements: 
+# - Developers of DCMTK DICOM Toolkit
+# - Developers of ShellCheck
+# - Maciej Radzikowski for the Bash script template  
+# https://betterdev.blog/minimal-safe-bash-script-template/
+###############################
+
+# -E - ensure ERR trap is handled correctly
+# -e - exit immediately when a command fails
+# -o pipefail - set the exit code of a pipeline to 
+# that of the rightmost command to exit with a 
+# non-zero status, or to zero if all commands of 
+# the pipeline exit successfully.
+# -u - treat unset variables as an error and exit 
+# immediately
+set -Eeuo pipefail
+
+# expand patterns that don't match files to the 
+# null string instead of returning a sting 
+#containing the pattern search for
+shopt -s nullglob
+
+# run the cleanup function (defined below) if 
+# SIGINT, SIGTERM, ERR or EXIT signals are 
+# received
+trap cleanup SIGINT SIGTERM ERR EXIT
+
+###############################
+# Display a usage message for the user then exit
+###############################
+usage() {
+  cat <<EOF
+Usage: $(basename "${BASH_SOURCE[0]}") [-h] [--no-color]
+
+Query and Retrieve series from studies on a DICOM peer
+
+Optional arguments:
+-h, --help      print help and exit
+--no-color      don't colorize terminal output
+
+Note: The hostname/ip-address of DICOM peer (HOST), tcp/ip port of peer (PORT), 
+calling AE title (AET) and called AE title (AEC) of peer are set using the environment 
+variables QRSCU_HOST_ENV, QRSCU_PORT_ENV, QRSCU_AET_ENV and QRSCU_AEC_ENV 
+respectively. If these are not set the following defaults are used:
+
+- HOST: 192.168.1.100
+- PORT: 11112
+- AET: QRSCU
+- AEC: PACS
+
+Tip: The environment variables can be set in your .bashrc file using export commands:
+
+export QRSCU_HOST_ENV="MY_HOSTNAME"
+export QRSCU_PORT_ENV="MY_PORT"
+export QRSCU_AET_ENV="MY_AET"
+export QRSCU_AEC_ENV="MY_AEC"
+
+EOF
+  exit
+}
+
+###############################
+# Reset SIGINT, SIGTERM, ERR and EXIT 
+# signals to their initial values
+###############################
+cleanup() {
+  trap - SIGINT SIGTERM ERR EXIT
+}
+
+###############################
+# Define colors to use in msg function
+# Globals:
+#   NOFORMAT
+#   RED
+#   GREEN
+###############################
+setup_colors() {
+  if [[ -t 2 ]] && [[ -z "${NO_COLOR-}" ]] && [[ "${TERM-}" != "dumb" ]]; then
+    # set color variable if:
+    # stderr is connected to the terminal AND
+    # NO_COLOR is empty AND
+    # terminal is NOT dumb 
+    NOFORMAT='\033[0m' RED='\033[0;31m' GREEN='\033[0;32m'
+  else
+    NOFORMAT='' RED='' GREEN=''
+  fi
+}
+
+###############################
+# Send command output to standard error 
+# Globals:
+# Outputs: message to stderr
+###############################
+msg() {
+  # -e option enables interpretation of backslash 
+  # escapes
+  # when using set -u option "${1-}" is needed to 
+  # ensure no error if $1 is unset
+  echo >&2 -e "${1-}"
+}
+
+###############################
+# Display an exit message to the user and set exit
+# code
+# Outputs: message to stderr
+# Returns: exit code
+###############################
+die() {
+  local msg="${1}"
+  local code="${2-1}" # set default exit status to 1
+  msg "$msg"
+  exit "$code"
+}
+
+###############################
+# Parse input parameters
+# Globals:
+#   args
+#   NO_COLOR
+###############################
+parse_params() {
+  while :; do
+    case "${1-}" in
+    -h | --help) usage ;; # display usage if user type h or help
+    --no-color) NO_COLOR=1 ;; # set colored output
+    -?*) die "Unknown option: $1" ;; # exit if given unknow optional argument
+    *) break ;; # collect up the postional arguments
+    esac # end of case statement
+    shift 
+  done
+  return 0
+}
+
+###############################
+# Get a key-value from a DICOM query response file
+# Arguments:
+#    DICOM response file
+#    key-name
+# Output:
+#    key-value
+###############################
+get_val(){
+
+  local -r fn="${1}"
+  local -r kn="${2}"
+  local d
+  d=$(dcmdump "${fn}" +P "${kn}" -s) 
+  echo "${d}" | cut -d "[" -f 2 | cut -d "]" -f 1
+}
+
+parse_params "$@"
+setup_colors
+
+# declare read-only variables to store DICOM details
+declare -r QRSCU_HOST="${QRSCU_HOST_ENV:-192.168.1.100}"
+declare -r QRSCU_PORT="${QRSCU_PORT_ENV:-11112}"
+declare -r QRSCU_AET="${QRSCU_AET_ENV:-QRSCU}"
+declare -r QRSCU_AEC="${QRSCU_AEC_ENV:-PACS}"
+msg "${GREEN} * checking DICOM connectivity with echoscu (Host:${QRSCU_HOST}, Port: ${QRSCU_PORT}, AET: ${QRSCU_AET}, AEC: ${QRSCU_AEC}) ${NOFORMAT}"
+echoscu -aet "${QRSCU_AET}" -aec "${QRSCU_AEC}" "${QRSCU_HOST}" "${QRSCU_PORT}"
+
+# prompting user for patient-study details with zenity form
+IFS="|" read -r PatientNameQ PatientIDQ DateOfBirthQ AccessionNumberQ StudyDateQ StudyDescriptionQ StudyIDQ StudyInstanceUIDQ <<<  $(zenity --forms \
+--title="Patient-Study Query" \
+--text="Enter details to query a patient-study (fields are optional):" \
+--add-entry="Patient Name ('?' and '*' wildcards can be used to match single or multiple characters)" \
+--add-entry="Patient ID ('?' and '*' wildcards can be used to match single or multiple characters)"  \
+--add-entry="Date of Birth (exact: YYYYMMDD, range: YYYYMMDD-YYYYMMDD, before: -YYYYMMDD, after: YYYYMMDD-)" \
+--add-entry="Accession Number ('?' and '*' wildcards can be used to match single or multiple characters)"  \
+--add-entry="Study Date (exact: YYYYMMDD, range: YYYYMMDD-YYYYMMDD, before: -YYYYMMDD, after: YYYYMMDD-)" \
+--add-entry="Study Description ('?' and '*' wildcards can be used to match single or multiple characters)" \
+--add-entry="Study ID ('?' and '*' wildcards can be used to match single or multiple characters)" \
+--add-entry="Study Instance UID (a list of UIDs with a '\' separator can be used)" )
+
+# check the user filled in at least one field in the patient-study query
+if [[ -z "${PatientNameQ}" ]] && [[ -z "${PatientIDQ}" ]] && [[ -z "${DateOfBirthQ}" ]] && [[ -z "${AccessionNumberQ}" ]] && [[ -z "${StudyDateQ}" ]] && [[ -z "${StudyDescriptionQ}" ]] && [[ -z "${StudyIDQ}" ]] && [[ -z "${StudyInstanceUIDQ}" ]]; then
+  die "${RED} ERROR: At least field must be filled in ${NOFORMAT}"
+fi
+
+msg "${GREEN} * creating temporary directory to store findscu study responses ${NOFORMAT}" 
+study_rsp_dp=$(mktemp -d)
+
+msg "${GREEN} * sending study-root study-level query with findscu ${NOFORMAT}"
+findscu -X -od "${study_rsp_dp}" \
+-k QueryRetrieveLevel="STUDY" \
+-k PatientName="${PatientNameQ}" \
+-k PatientID="${PatientIDQ}" \
+-k PatientBirthDate="${DateOfBirthQ}" \
+-k AccessionNumber="${AccessionNumberQ}" \
+-k StudyDate="${StudyDateQ}" \
+-k StudyTime="" \
+-k ModalitiesInStudy="" \
+-k NumberOfStudyRelatedSeries="" \
+-k NumberOfStudyRelatedInstances="" \
+-k StudyDescription="${StudyDescriptionQ}" \
+-k StudyID="${StudyIDQ}" \
+-k StudyInstanceUID="${StudyInstanceUIDQ}" \
+--study \
+-aet "${QRSCU_AET}" \
+-aec "${QRSCU_AEC}" \
+"${QRSCU_HOST}" \
+"${QRSCU_PORT}" 
+
+# count the number of study responses
+study_rsp_fns=("${study_rsp_dp}"/*.dcm)
+n_study_rsp="${#study_rsp_fns[@]}"
+
+# exit if no responses
+if [[ "${n_study_rsp}" -eq 0 ]]; then
+  msg "${GREEN} ** no responses to study level query received, exiting ${NOFORMAT}"
+  exit
+fi
+
+# multiple responses received - ask user which 
+# study they want to perform a series level 
+# query on
+study_column_names=(--column="Selection" \
+--column="Patient Name" \
+--column="Patient ID" \
+--column="Date of Birth" \
+--column="Accession Number" \
+--column="Study Date" \
+--column="Study Time" \
+--column="# Series" \
+--column="# Images" \
+--column="Study Description" \
+--column="Modalities in Study" \
+--column="Study ID" \
+--column="Study Instance UID")
+
+study_rsp_table=()
+for study_rsp_fn in "${study_rsp_fns[@]}"; do  
+  PatientName=$(get_val "${study_rsp_fn}" "PatientName")
+  PatientID=$(get_val "${study_rsp_fn}" "PatientID")
+  PatientBirthDate=$(get_val "${study_rsp_fn}" "PatientBirthDate")
+  AccessionNumber=$(get_val "${study_rsp_fn}" "AccessionNumber")
+  StudyDate=$(get_val "${study_rsp_fn}" "StudyDate")
+  StudyTime=$(get_val "${study_rsp_fn}" "StudyTime")
+  NumberOfStudyRelatedSeries=$(get_val "${study_rsp_fn}" "NumberOfStudyRelatedSeries")
+  NumberOfStudyRelatedInstances=$(get_val "${study_rsp_fn}" "NumberOfStudyRelatedInstances")
+  StudyDescription=$(get_val "${study_rsp_fn}" "StudyDescription")
+  ModalitiesInStudy=$(get_val "${study_rsp_fn}" "ModalitiesInStudy")
+  StudyID=$(get_val "${study_rsp_fn}" "StudyID")
+  StudyInstanceUID=$(get_val "${study_rsp_fn}" "StudyInstanceUID")
+  study_rsp_table+=( 'FALSE' \
+  "${PatientName}" \
+  "${PatientID}" \
+  "${PatientBirthDate}" \
+  "${AccessionNumber}" \
+  "${StudyDate}" \
+  "${StudyTime}" \
+  "${NumberOfStudyRelatedSeries}" \
+  "${NumberOfStudyRelatedInstances}" \
+  "${StudyDescription}" \
+  "${ModalitiesInStudy}" \
+  "${StudyID}" \
+  "${StudyInstanceUID}" )
+done
+
+StudyInstanceUID=$(zenity --list \
+--radiolist \
+--title "Select One Study" \
+--print-column=13 \
+"${study_column_names[@]}" "${study_rsp_table[@]}")
+
+msg "${GREEN} * creating temporary directory to store findscu series responses ${NOFORMAT}" 
+series_rsp_dp=$(mktemp -d)
+
+msg "${GREEN} * sending study-root series-level query with findscu ${NOFORMAT}"
+findscu -X -od "${series_rsp_dp}" \
+-k QueryRetrieveLevel="SERIES" \
+-k StudyInstanceUID="${StudyInstanceUID}" \
+-k Modality="" \
+-k SeriesDescription="" \
+-k SeriesDate="" \
+-k SeriesTime="" \
+-k SeriesInstanceUID="" \
+-k SeriesNumber="" \
+-k NumberOfSeriesRelatedInstances="" \
+--study \
+-aet "${QRSCU_AET}" \
+-aec "${QRSCU_AEC}" \
+"${QRSCU_HOST}" \
+"${QRSCU_PORT}" 
+
+# count the number of series responses
+series_rsp_fns=("${series_rsp_dp}"/*.dcm)
+n_series_rsp="${#series_rsp_fns[@]}"
+
+# exit if no responses
+if [[ "${n_series_rsp}" -eq 0 ]]; then
+  msg "${GREEN} ** no responses to series level query received, exiting ${NOFORMAT}"
+  exit
+fi
+
+# multiple responses received - ask user which 
+# series they want to retrieve
+series_column_names=(--column="Selection" \
+--column="Series Number" \
+--column="Modality" \
+--column="# Images" \
+--column="Series Description" \
+--column="Series Date" \
+--column="Series Time" \
+--column="Series Instance UID")
+
+series_rsp_table=()
+for series_rsp_fn in "${series_rsp_fns[@]}"; do  
+  SeriesNumber=$(get_val "${series_rsp_fn}" "SeriesNumber")
+  SeriesDate=$(get_val "${series_rsp_fn}" "SeriesDate")
+  SeriesTime=$(get_val "${series_rsp_fn}" "SeriesTime")
+  Modality=$(get_val "${series_rsp_fn}" "Modality")
+  NumberOfSeriesRelatedInstances=$(get_val "${series_rsp_fn}" "NumberOfSeriesRelatedInstances")
+  SeriesDescription=$(get_val "${series_rsp_fn}" "SeriesDescription")
+  SeriesInstanceUID=$(get_val "${series_rsp_fn}" "SeriesInstanceUID")
+  series_rsp_table+=( 'FALSE' \
+  "${SeriesNumber}" \
+  "${Modality}" \
+  "${NumberOfSeriesRelatedInstances}" \
+  "${SeriesDescription}" \
+  "${SeriesDate}" \
+  "${SeriesTime}" \
+  "${SeriesInstanceUID}" )
+done
+
+IFS="|"  read -r -a SeriesInstanceUIDs <<< $(zenity --list \
+--checklist \
+--title "Select Series to Retrieve" \
+--print-column=8 \
+"${series_column_names[@]}" "${series_rsp_table[@]}")
+
+n_series_sel="${#SeriesInstanceUIDs[@]}"
+# exit if no series selected
+if [[ "${n_series_sel}" -eq 0 ]]; then
+  msg "${GREEN} * no series selected, exiting ${NOFORMAT}"
+  exit
+fi
+
+series_counter=1
+msg "${GREEN} * retrieving series: ${NOFORMAT}"
+for SeriesInstanceUID in "${SeriesInstanceUIDs[@]}"
+do
+    msg "${GREEN} ** ${series_counter} of ${n_series_sel} ${NOFORMAT}"
+    movescu --study \
+    -k QueryRetrieveLevel="SERIES" \
+    -k StudyInstanceUID="${StudyInstanceUID}" \
+    -k SeriesInstanceUID="${SeriesInstanceUID}" \
+    -aet "${QRSCU_AET}" \
+    -aec "${QRSCU_AEC}" \
+    -aem "${QRSCU_AET}" \
+    "${QRSCU_HOST}" \
+    "${QRSCU_PORT}" 
+    series_counter=$((series_counter + 1))
+done
